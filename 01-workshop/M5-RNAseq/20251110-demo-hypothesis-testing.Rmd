@@ -1,0 +1,266 @@
+---
+title: "Demonstrate hypothesis testing"
+author: Bin HE
+date: 2025-11-10, updated `r Sys.Date()`
+output: html_notebook
+---
+
+<style type="text/css">
+    body { /* Normal body text */
+      font-size: 18px;
+    }
+    h1 { /* Header 1 */
+      font-size: 32px;
+    }
+    code.r { /* R code blocks */
+      font-size: 12px;
+    }
+    blockquote {
+      background-color: #F0F8FF; /* AliceBlue */
+    }
+</style>
+    
+```{r}
+require(tidyverse)
+require(broom)
+require(cowplot)
+```
+
+```{r}
+old = theme_set(theme_bw(base_size = 16))
+```
+
+## Intro
+
+This notebook is to demonstrate a few basic concepts behind hypothesis testing.
+
+1. What happens under the null hypothesis, simple idea of P-value, type-I error
+2. Bring in the alternative hypothesis, type-II error, power
+3. Distribution of P-value under the null hypothesis
+4. Multiple testing, how to correct
+
+## Null hypothesis
+Let's generate simulate some data under the null hypothesis. The scenario we are simulating is a simple two sample Student's t-test, with 10 replicates each group. Under the null hypothesis, samples from the two groups are drawn from the same normal distribution. We will use this to examine some basic concept in hypothesis testing, including type I erorr and P-value.
+
+Our approach to do this is to draw 20,000 random samples from the N(2,1) distribution (mean of 2 and variance of 1). These random values will be shaped into a 1,000 x 20 matrix. We will then iterate through the rows of this matrix. For each row, we will treat the first 10 numbers as the control and the second 10 numbers as the experimental group. A two-sided Student's t-test will be performed. The t-test statistic and the p-value will be recorded
+
+```{r}
+
+dat <- rnorm(20000, 2, 1) |>
+  matrix(ncol = 20)
+group <- gl(2, 10, labels = c("Ctrl", "Exp"))
+```
+
+Now, let's perform the t-test and extract the test statistics
+```{r}
+test_results <- apply(dat, 1, \(x) t.test(x ~ group)) |>
+  map(tidy) |>
+  list_rbind(names_to = "test")
+```
+
+Let's check the distribution of the two groups...
+```{r}
+tmp <- tibble(
+  value = c(dat[, 1:10], dat[, 11:20]),
+  group = rep(c("Ctrl", "Exp"), each = 10000)
+)
+
+ggplot(tmp, aes(x = value, fill = group)) +
+  geom_density(alpha = 0.5) + 
+  geom_rug(data = tibble(value = dat[15,], group = group),
+           aes(x = value, color = group),
+           sides = "b", linewidth = 0.5)
+```
+Note that samples from the two groups for one of the 1,000 tests were marked.
+
+... and the distribution of the difference in the mean ...
+```{r}
+plot(density(test_results$estimate), main = "Difference in mean between groups")
+```
+... and distribution of the P-values
+```{r}
+hist(test_results$p.value, breaks = 10, xlab = "p-value")
+```
+
+Now, let's check how many tests are "significant" at a 0.05 level even when the null hypothesis is true for all the tests
+```{r}
+sig_tests <- table(test_results$p.value < 0.05)
+pie(sig_tests, col = c("gray", "hotpink"))
+```
+> Turns out this is by definition: when we set an arbitrary threshold to reject the null hypothesis, e.g., at 0.05, we are "guaranteed" to reject the null hypothesis FALSELY, that is, when the null hypothesis is actually correct, for about 5% of the times if the null hypothesis is true for all tests.
+
+We could compare the empirical distribution of the test statistic with the theoretical distribution under the null hypothesis, which is a t-distribution with 20-2=18 degrees of freedom
+```{r}
+# Generate theoretical t-distribution
+x_range <- seq(-5, 5, length.out = 1000)
+theoretical_t <- tibble(
+  x = x_range,
+  density = dt(x_range, df = 18)
+)
+
+# Plot
+ggplot(test_results) +
+  geom_histogram(aes(x = statistic, y = after_stat(density)), 
+                 bins = 50, fill = "lightblue", color = "black", alpha = 0.7) +
+  geom_line(data = theoretical_t,
+            aes(x = x, y = density),
+            color = "red", linewidth = 1.5) +
+  labs(x = "t-statistic", 
+       y = "Density",
+       title = "Distribution of t-statistics vs Theoretical t(18)",
+       subtitle = "Histogram: observed t-statistics | Red line: theoretical t-distribution with df=18")
+```
+
+## Alternative hypothesis
+Now let's simulate a more interesting case, where the experimental group indeed has a different mean (think about some health metric after a drug treatment). For simplicity's sake, let's assume they still have the same variance (in reality this is much more complicated).
+
+In particular, we will assume that the experimental group has a mean of 4 instead of 2, which is two standard deviations apart from the control.
+```{r}
+# replace the values for the experimental group
+dat1 <- dat; dat1[,11:20] <- dat[, 11:20] + 2 
+```
+
+Let's visulaize the distribution of the two groups...
+```{r}
+tmp <- tibble(
+  value = c(dat1[, 1:10], dat1[, 11:20]),
+  group = rep(c("Ctrl", "Exp"), each = 10000)
+)
+
+ggplot(tmp, aes(x = value, fill = group)) +
+  geom_density(alpha = 0.5) + 
+  geom_rug(data = tibble(value = dat1[15,], group = group),
+           aes(x = value, color = group),
+           sides = "b", linewidth = 0.5)
+```
+
+OK, they do look quite different. So, how do our t-tests do? Let's perform the t-test and extract the test statistics as before.
+```{r}
+test_results_alt <- apply(dat1, 1, \(x) t.test(x ~ group)) |>
+  map(tidy) |>
+  list_rbind(names_to = "test")
+```
+
+Let's check the distribution of the difference in the mean between the two groups ...
+```{r}
+plot(density(test_results_alt$estimate), main = "Difference in mean between groups")
+```
+> Notice how the distribution is still symmetric, but it is centered not on zero but -2 (as we would expect since the true difference in mean is supposed to be 2 and this is control - experiment, which makes it -2)
+
+... and distribution of the P-values
+```{r}
+hist(test_results_alt$p.value, breaks = 10, xlab = "p-value")
+```
+
+Type-II error is defined as the probability of falsely accepting the null hypothesis when the alternative hypothesis is true. This is also known as the "power" of the test. Unfortunately, the power of the test relies on information we usually don't have, that is, the alternative hypothesis -- We cheated here as we simulated data for the experimental group from a known alternative distribution. In practice, we almost always don't know. This means, with the same null hypothesis and the same p-value cutoff, we could either have great power to detect a true difference -- this happens when the alternative hypothesis distribution is quite far away from the null, or we would have little power to do so, if the alternative distribution is very close to the null. Let's examine these two cases:
+
+```{r}
+power = sum(test_results_alt$p.value < 0.05)
+print(power/1000)
+```
+
+Now, let's simulate another experimental group, this time making the mean 2.1 instead of 4. This means the alternative and the null distribution look very similar, as shown below
+```{r}
+dat2 <- dat; dat2[,11:20] <- dat[, 11:20] + .1 
+tmp <- tibble(
+  value = c(dat2[, 1:10], dat2[, 11:20]),
+  group = rep(c("Ctrl", "Exp"), each = 10000)
+)
+
+ggplot(tmp, aes(x = value, fill = group)) +
+  geom_density(alpha = 0.5) + 
+  geom_rug(data = tibble(value = dat[15,], group = group),
+           aes(x = value, color = group),
+           sides = "b", linewidth = 0.5)
+```
+This time there is not much separation. So, how do our t-tests do? Let's perform the t-test and extract the test statistics as before.
+```{r}
+test_results_alt2 <- apply(dat2, 1, \(x) t.test(x ~ group)) |>
+  map(tidy) |>
+  list_rbind(names_to = "test")
+```
+
+Let's check the distribution of the difference in the mean between the two groups ...
+```{r}
+plot(density(test_results_alt2$estimate), main = "Difference in mean between groups")
+```
+> Hmm, not promising.
+
+What's the power of our test?
+```{r}
+power = sum(test_results_alt2$p.value < 0.05)
+print(power/1000)
+```
+
+> Indeed, we have only 5% chance to detect a true difference even when the alternative hypothesis is indeed true. These are type-II errors, or false negatives!
+
+
+## Mixed cases
+In RNA-seq, a reasonable assumption is that only a small subset of the genes are differentially expressed. Think of this way: the expression matrix we just simulated, with 1000 genes and 10 replicates in each of the two groups, would be a mixture of, say, 950 genes with no differential expression and 50 that do (5% of the genes are DEGs). For the former group, the expression values would have been drawn from the same distribution, as we did in the first part, under the null hypothesis, while the remaining would show a true difference. Let's simulate that
+```{r}
+deg_genes = sample(1:1000, 50) # this will randomly assign 100 of the 1000 genes (rows) as DGEs
+# now, for each of the selected DEGs, we will add a small random number to the experimental group,
+# representing a shift in the mean
+dat_mix = dat
+effect_size = rchisq(50, 2) # we draw some random effect sizes from the Chisq df=2 distribution
+hist(effect_size)
+dat_mix[deg_genes, 11:20] = 
+  dat_mix[deg_genes, 11:20] + matrix(rep(effect_size, times = 10), ncol = 10)
+```
+
+Now we have a toy matrix that resembles an RNA-seq experiment. We know which genes were DEGs and we know their effect size. Let's pretend we don't know that and let the statistical tests tell us. How well would they do?...
+```{r}
+test_results_mix <- apply(dat_mix, 1, \(x) t.test(x ~ group)) |>
+  map(tidy) |>
+  list_rbind(names_to = "test")
+```
+
+Let's check the distribution of the difference in the mean between the two groups ...
+```{r}
+plot(density(test_results_mix$estimate), main = "Difference in mean between groups")
+```
+> We see that for the majority of the tests the difference is centered on zero, but we have a long "tail" where there is a notable difference, due to the DEGs we put in.
+
+Let's check the distribution of the P-values
+```{r}
+hist(test_results_mix$p.value, breaks = 10, xlab = "p-value")
+```
+> Interestingly, this distribution looks a lot like the one where we had all data simulated under the null distribution, where the p-value is expected to be uniformly distributed.
+
+Let's see the number of cases where we 1) correctly rejected the null hypothesis (True Positive); 2) incorrectly rejected the null hypothesis (False Positive); 3) correctly accepted the null hypothesis (True Negative) and 4) false accepted the null hypothesis (False Negative).
+
+```{r}
+test_mix_summary <- select(test_results_mix, test, p.value) |>
+  mutate(Actual = test %in% deg_genes, Decision2 = p.value < 0.05)
+
+with(test_mix_summary, table(Actual, Decision))
+```
+
+> So, we have successfully identified 32/50 DEGs, at the cost of identifying 49 false positives. Note that this means for every true positive, we are identifying 1.5 false positives! That's not so good!
+
+Now, if we are really concerned about false positives, we would use a multiple testing correction method known as controlling for the family-wise error rate. The most common method is Bonferroni correction. Let's see what it does to our table
+
+```{r}
+test_mix_summary <- test_mix_summary |>
+  mutate(Padj_Bonf = p.adjust(p.value, method = "bonf"),
+         Decision_Bonf = Padj_Bonf < 0.05)
+
+with(test_mix_summary, table(Actual, Decision_Bonf))
+```
+> Now we are doing much better with false positives. In this case, we eliminated all of them! Good! In fact, controlling FWER at or below 0.05 means we expect the chance to identify at least one false positive (i.e., make a type I error) to be 0.05.
+> However, this comes at the expense of a loss of power. Now, instead of identifying 32/50, or a power of 0.64, we are doing far worse, identifying just 30% of the true positives.
+> Indeed, if the effect size is small or if the variance is large, we would be at the risk of not identifying any DEGs.
+
+In genomics, the goal is often to identify a list of genes among which we hope some are true positives. The "cost" of false positives is often not life or death (it means a poor graduate student or postdoc will have to find out that 5/10 genes they knocked out actually had no effect). To this end, biologists have worked with statistians to create a different measure, called False Discovery Rate. In the literature, this has many different names and often used in incorrect ways. But overall the basic idea is that instead of controlling for the probability of identifying even one false positive, which is what the FWER control does, FDR is instead controlling for the percentage of false positives at a particular cutoff. Say, if at an FDR of 0.1, we identified 10 DEGs. If all statistical assumptions hold, we expect 10% of those 10 DEGs to be false positives. That is actually quite good. I would feel comfortable having my lab follow up on the top five or even all ten genes, knowing that maybe one of them will be a fluke (in practice, not all statistical assumptions hold, and hence, our graduate students and postdocs may still find themselves looking at negative results..)
+
+Let's see how controlling for FDR works. We will use a popular Benjamini & Hochberg (BH) correction method:
+```{r}
+test_mix_summary <- test_mix_summary |>
+  mutate(Padj_BH = p.adjust(p.value, method = "BH"),
+         Decision_BH = Padj_BH < 0.05)
+
+with(test_mix_summary, table(Actual, Decision_BH))
+```
+> Now, we are making the middle of the road. Our false positive rate among the identified DEGs is 1/22, or about 0.045, very close to our intended 0.05 level. At this threshold, we made a compromise on the power, identifying less than half of the true positives. But we made significant improvement on the false positives!
+
+Hope this is a useful lesson!
