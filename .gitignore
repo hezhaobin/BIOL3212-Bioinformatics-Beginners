@@ -48,3 +48,7 @@ vignettes/*.pdf
 # R Environment Variables
 .Renviron
 .Rproj.user
+
+# Posit Connect / shinyapps.io deployment metadata
+rsconnect/
+rsconnect-python/
